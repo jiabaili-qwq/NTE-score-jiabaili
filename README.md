@@ -1,6 +1,11 @@
-# jiabaili 评分包
+# jiabaili 评分包（NTEUID / 异环）
 
-NTEUID 外置评分包，`scorer_id`: `jiabaili`。
+> [NTEUID](https://github.com/tyql688/NTEUID) 的外置评分包（scoring package），`scorer_id`: `jiabaili`。
+> 适配 NTEUID 的 [scoring 评分体系](https://github.com/tyql688/NTEUID/tree/main/NTEUID/scoring)。
+>
+> **角色权重数据来源：异环工坊**（https://REDACTED-WEIGHT-API）
+
+适用游戏：异环 / Neverness to Everness（NTE）。安装方式见下文「安装」。
 
 ## 计算标准
 
