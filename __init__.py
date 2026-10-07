@@ -47,7 +47,7 @@ _CACHE_PATH = _DATA / "weights_cache.json"
 # 策略：首次安装不带任何权重数据；首次评分运行请求接口，成功即把权重缓存到
 # weights_cache.json；往后每天 06:00 / 12:00 / 18:00 / 00:00 自动请求接口刷新该缓存。
 # 每次评分优先实时请求接口取最新权重，失败时降级到该缓存文件做计算。
-_API_URL = "https://REDACTED-WEIGHT-API/api/open/game-character/weight-configs"
+_API_URL = "https://yh.zzzmap.com/api/open/game-character/weight-configs"
 _API_TIMEOUT = 8.0
 # 每天自动刷新缓存的整点（本地时区）
 _REFRESH_HOURS = (0, 6, 12, 18)
