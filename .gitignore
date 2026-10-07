@@ -1,0 +1,8 @@
+﻿# git artifacts & runtime cache - do not ship
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+data/weights_cache.json
+data/*.tmp
