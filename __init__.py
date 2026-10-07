@@ -7,14 +7,16 @@
 
 权重数据策略：
 - 包内不预置任何权重数据；首次成功请求接口后，把权重缓存到本地 data/weights_cache.json。
-- 后台任务每天 12:00 请求接口并刷新该缓存文件。
+- 后台任务每天 00:00 / 06:00 / 12:00 / 18:00 请求接口并刷新该缓存文件。
 - 每次评分优先实时请求接口，失败则降级用缓存文件计算；两者都不可用则报「评分数据缺失」。
 
 高亮规则：副词条只亮权重最高的 4 个，主词条只亮权重最高的（并列都亮）。
+核心件（卡带）与盘件（驱动块）主词条数据可能缺失（服务端只回 id 缺 name/value），
+此时按「魂属性异能伤害增强」判定高亮与主词条权重。
+核心件与盘件均不挂评级徽章。
 
 总评分评级（350 满分固定分档）：ACE≥280 / SSS≥260 / SS≥240 / S≥220 /
 A+≥200 / A≥180 / B≥160 / C≥140 / D<140。
-盘件（驱动块）不挂评级徽章，仅核心件（卡带）按单件得分/满分比例评 ACE~D。
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from collections.abc import Sequence
 
 import httpx
 
+from gsuid_core.logger import logger
+
 from ...contract import GradeSpec, BaseScorer, ScorerMeta
 from ...registry import register_scorer
 from ....utils.sdk.tajiduo_model import CharacterDetail, CharacterProperty, CharacterSuitItem
@@ -36,19 +40,22 @@ from ....utils.resource.RESOURCE_PATH import SCORING_PATH
 
 _DATA = Path(__file__).parent / "data"
 _ASSETS = Path(__file__).parent / "assets"
-# 每天 12:00 拉取接口后落盘的缓存文件
+# 接口成功后落盘的本地缓存文件（首次评分时建立，每天定时刷新）
 _CACHE_PATH = _DATA / "weights_cache.json"
 
 # 权重数据源：异环工坊开放接口。
-# 策略：后台任务每天 12:00 请求接口并写入 weights_cache.json；
-# 每次评分优先实时请求接口，失败时降级到该缓存文件做计算。
+# 策略：首次安装不带任何权重数据；首次评分运行请求接口，成功即把权重缓存到
+# weights_cache.json；往后每天 06:00 / 12:00 / 18:00 / 00:00 自动请求接口刷新该缓存。
+# 每次评分优先实时请求接口取最新权重，失败时降级到该缓存文件做计算。
 _API_URL = "https://REDACTED-WEIGHT-API/api/open/game-character/weight-configs"
 _API_TIMEOUT = 8.0
+# 每天自动刷新缓存的整点（本地时区）
+_REFRESH_HOURS = (0, 6, 12, 18)
 
 # 实时接口的内存缓存：避免批量评分时几十次角色各发一次请求
 _REMOTE_WEIGHTS: dict | None = None
 _FETCH_LOCK: asyncio.Lock | None = None
-# 每天 12:00 定时刷新任务
+# 每天定时刷新任务
 _DAILY_TASK: asyncio.Task | None = None
 
 # 整套满分：空幕 35 格 × 10 分
@@ -92,6 +99,12 @@ PIECE_GRADES = (
 # 两者是同一属性「魂属性异能伤害增强」，按游戏侧拼写统一。
 _PROP_ID_ALIASES = {"damageupsychebase": "damageuppsychebase"}
 
+# 盘件（驱动块）与核心件（卡带）主词条服务端可能只回 `{id}` 缺 `name`/`value`
+# （见 tajiduo_model.CharacterProperty docstring），无法从 name 反查词条 id，
+# 默认按「魂属性异能伤害增强」判定高亮与主词条权重。
+# 塔吉多侧拼写为 damageuppsychebase（双 p），与工坊单 p 别名见 _PROP_ID_ALIASES。
+_DEFAULT_MAIN_PROP_ID = "damageuppsychebase"
+
 
 def _canon_prop_id(prop_id: str) -> str:
     pid = (prop_id or "").lower()
@@ -118,17 +131,36 @@ class _Result:
     top_sub_ids: frozenset[str] = frozenset()
 
     def is_role_prop_effective(self, prop: CharacterProperty) -> bool:
-        # 角色面板：与词条高亮口径一致，只认权重最高的主/副词条。
+        # 角色面板：与装备词条高亮同一口径 —— 主词条只亮权重最高、副词条只亮权重最高的 4 个。
+        # 属性 id 在角色面板可能与工坊权重 key 不同名（同一属性多种写法），
+        # 故先按 id 精确命中；不命中再经 attributes.json 的 name -> ids 反查（同 yuye 做法）。
         pid = _canon_prop_id(prop.id)
-        return pid in self.top_main_ids or pid in self.top_sub_ids
+        if not prop.name.strip() and not prop.value.strip():
+            return pid == _DEFAULT_MAIN_PROP_ID
+        if pid in self.top_main_ids or pid in self.top_sub_ids:
+            return True
+        return any(
+            i in self.top_main_ids or i in self.top_sub_ids
+            for i in _attr_name_ids().get(prop.name, ())
+        )
 
     def is_main_prop_counted(self, prop: CharacterProperty) -> bool:
-        # 装备主词条：只有「权重最高」的主词条高亮；驱动块主词条不在表内恒不亮。
-        return _canon_prop_id(prop.id) in self.top_main_ids
+        # 装备主词条：只有「权重最高」的主词条高亮（核心件、盘件同一口径）。
+        # 主词条若缺 name/value（数据缺失），默认按「魂属性异能伤害增强」判定。
+        pid = _canon_prop_id(prop.id)
+        if not prop.name.strip() and not prop.value.strip():
+            return pid == _DEFAULT_MAIN_PROP_ID
+        return pid in self.top_main_ids
 
     def is_sub_prop_recommended(self, prop: CharacterProperty) -> bool:
         # 装备副词条：只有「权重最高」的副词条高亮。
         return _canon_prop_id(prop.id) in self.top_sub_ids
+
+    def highlight_color(self, prop: CharacterProperty, locked: bool) -> tuple[int, int, int] | None:
+        """HighlightPalette 协议：高亮词条渲染为金色；未解锁副词条用暗金。"""
+        if locked:
+            return (180, 150, 50)
+        return (255, 200, 64)
 
 
 def _normalize_weights(raw: dict) -> dict[str, dict[str, dict[str, float] | frozenset[str]]]:
@@ -144,22 +176,31 @@ def _normalize_weights(raw: dict) -> dict[str, dict[str, dict[str, float] | froz
 
 @lru_cache(maxsize=1)
 def _cached_weights() -> dict[str, dict[str, dict[str, float] | frozenset[str]]]:
-    """本地兜底权重：首次接口成功后落盘的 data/weights_cache.json（每天 12:00 定时刷新）。"""
+    """本地兜底权重：首次接口成功后落盘的 data/weights_cache.json（每天 4 个整点定时刷新）。"""
     if not _CACHE_PATH.exists():
         raise ValueError(f"评分数据缺失: {_CACHE_PATH}（接口暂不可用，等待首次接口成功后缓存）")
     raw = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
     return _normalize_weights(raw)
 
 
+def _resolve_main_prop_id(prop: CharacterProperty) -> str:
+    """主词条 id：数据缺失（缺 name/value）时默认按「魂属性异能伤害增强」。
+    仅用于评分时取主词条权重；高亮判定仍以实际词条 id 为准。"""
+    pid = _canon_prop_id(prop.id)
+    if not prop.name.strip() and not prop.value.strip():
+        return _DEFAULT_MAIN_PROP_ID
+    return pid
+
+
 def _weights() -> dict[str, dict[str, dict[str, float] | frozenset[str]]]:
-    """生效权重：实时接口成功优先，否则降级到 12:00 缓存文件。"""
+    """生效权重：实时接口成功优先，否则降级到本地缓存文件。"""
     if _REMOTE_WEIGHTS is not None:
         return _REMOTE_WEIGHTS
     return _cached_weights()
 
 
-def _parse_api_payload(payload: dict) -> dict[str, dict[str, dict[str, float] | frozenset[str]]]:
-    """异环工坊权重接口响应 -> 包内权重格式。"""
+def _parse_api_raw(payload: dict) -> dict[str, dict]:
+    """异环工坊权重接口响应 -> 原始包内结构（highlight 为 list，可 JSON 序列化）。"""
     raw: dict[str, dict] = {}
     for char in payload.get("data") or []:
         char_id = str(char.get("itemId") or "").strip()
@@ -190,7 +231,7 @@ def _parse_api_payload(payload: dict) -> dict[str, dict[str, dict[str, float] | 
         }
     if not raw:
         raise ValueError("权重接口未解析到角色数据")
-    return _normalize_weights(raw)
+    return raw
 
 
 def _fetch_lock() -> asyncio.Lock:
@@ -201,7 +242,7 @@ def _fetch_lock() -> asyncio.Lock:
 
 
 def _write_cache(raw: dict) -> None:
-    """把接口解析出的包内权重格式原子落盘到 12:00 缓存文件。"""
+    """把接口解析出的原始权重结构（highlight 为 list，可 JSON 序列化）原子落盘。"""
     _DATA.mkdir(parents=True, exist_ok=True)
     tmp = _CACHE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -209,18 +250,27 @@ def _write_cache(raw: dict) -> None:
 
 
 async def _fetch_remote() -> dict | None:
-    """实时请求异环工坊权重接口；成功返回解析后的权重并同步落盘，失败返回 None。"""
+    """实时请求异环工坊权重接口；成功返回归一化权重并同步落盘，失败返回 None。
+
+    落盘存「归一化前的原始结构」（highlight 为 list），否则 frozenset 无法 JSON 序列化；
+    内存缓存用归一化产物。失败写日志，便于定位为何没建立缓存。
+    trust_env=False：不读系统代理等环境变量，避免 gsuid_core 运行环境下代理劫持握手。
+    """
     try:
-        async with httpx.AsyncClient(timeout=_API_TIMEOUT) as client:
+        async with httpx.AsyncClient(
+            timeout=_API_TIMEOUT, follow_redirects=True, trust_env=False
+        ) as client:
             resp = await client.get(_API_URL)
             resp.raise_for_status()
             payload = resp.json()
-        weights = _parse_api_payload(payload)
-        # 接口成功即刷新 12:00 缓存文件，保证兜底数据与线上同步
-        _write_cache(weights)
+        raw = _parse_api_raw(payload)
+        # 接口成功即落盘到本地缓存文件（首次评分即建立），保证兜底数据与线上同步
+        _write_cache(raw)
         _cached_weights.cache_clear()
-        return weights
-    except Exception:
+        logger.info(f"[jiabaili] 权重接口拉取成功，已缓存到 {_CACHE_PATH.name}")
+        return _normalize_weights(raw)
+    except Exception as error:
+        logger.warning(f"[jiabaili] 权重接口请求失败，本次走本地缓存: {error!r}")
         return None
 
 
@@ -238,19 +288,23 @@ async def _refresh_weights(force: bool = False) -> None:
         # 失败则 _REMOTE_WEIGHTS 维持 None，_weights() 自动降级到缓存文件
 
 
-def _seconds_until_next_noon() -> float:
-    """距下一个 12:00 的秒数（本地时区）。"""
+def _seconds_until_next_refresh() -> float:
+    """距下一个刷新整点（00:00 / 06:00 / 12:00 / 18:00，本地时区）的秒数。"""
     now = datetime.now()
-    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    if now >= noon:
-        noon += timedelta(days=1)
-    return (noon - now).total_seconds()
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    candidates = [
+        today_midnight + timedelta(days=day, hours=hour)
+        for day in (0, 1)
+        for hour in _REFRESH_HOURS
+    ]
+    nxt = min(t for t in candidates if t > now)
+    return (nxt - now).total_seconds()
 
 
 async def _daily_refresh_loop() -> None:
-    """每天 12:00 定时拉取接口并落盘到缓存文件。"""
+    """每天 00:00 / 06:00 / 12:00 / 18:00 定时请求接口并落盘到缓存文件。"""
     while True:
-        await asyncio.sleep(_seconds_until_next_noon())
+        await asyncio.sleep(_seconds_until_next_refresh())
         async with _fetch_lock():
             await _fetch_remote()
 
@@ -394,7 +448,7 @@ class JiabailiScorer(BaseScorer):
         return "\n".join(lines)
 
     async def prepare(self) -> None:
-        # 预热：强拉一次接口并落盘，再启动每天 12:00 定时刷新
+        # 预热：强拉一次接口并落盘，再启动每天 4 整点（00/06/12/18）定时刷新
         await _refresh_weights(force=True)
         _start_daily_task()
 
@@ -407,7 +461,7 @@ class JiabailiScorer(BaseScorer):
         _attr_name_ids.cache_clear()
 
     async def score_character(self, character: CharacterDetail) -> _Result | None:
-        # 每次评分优先实时接口，失败自动降级到 12:00 缓存文件
+        # 每次评分优先实时接口，失败自动降级到定时缓存文件
         await _refresh_weights()
         weights = _weights().get(str(character.id))
         if not weights:
@@ -435,8 +489,9 @@ class JiabailiScorer(BaseScorer):
             q = _quality_factor(item.id)
             if area is None:
                 # 核心件（卡带）：(主词条权重 × 50 + 副词条权重 / 理论满权重 × 100) × 品质
+                # 主词条数据缺失时按默认「魂属性异能伤害增强」取权重
                 main_w = max(
-                    (_weight_for(prop.id, main_weights) for prop in item.main_properties),
+                    (_weight_for(_resolve_main_prop_id(prop), main_weights) for prop in item.main_properties),
                     default=0.0,
                 )
                 sub_w = sum(
@@ -458,8 +513,8 @@ class JiabailiScorer(BaseScorer):
 
             piece_score = min(piece_score, piece_max)
             total += piece_score
-            # 盘件（驱动块）不挂评级徽章：grade 置 None，渲染端 grade_badge 对 None 不画
-            piece_grade = _piece_grade(piece_score, piece_max) if area is None else None
+            # 核心件与盘件均不挂评级徽章：grade 置 None，渲染端 grade_badge 对 None 不画
+            piece_grade = None
             equipment.append(
                 _EquipmentView(
                     item_id=item.id,
