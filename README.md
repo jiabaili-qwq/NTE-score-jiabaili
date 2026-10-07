@@ -80,6 +80,6 @@ NTE-score-jiabaili/
 
 代码以 [MIT License](LICENSE) 发布。
 
-角色**权重数据**来自「异环工坊」（小程序，https://REDACTED-WEIGHT-API），其权利归
+角色**权重数据**来自「异环工坊」（小程序），其权利归
 异环工坊所有，不在 MIT 授权范围内；使用或再分发基于该权重数据的计算结果时，
 请按其要求标注「角色权重数据来源小程序：异环工坊」。详见 `LICENSE` 末尾 NOTICE。

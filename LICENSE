@@ -24,8 +24,7 @@ SOFTWARE.
 
 NOTICE — 角色权重数据（Character weight data）
 
-本评分包在运行时所使用的角色词条权重数据来自「异环工坊」（小程序，
-https://REDACTED-WEIGHT-API），由其公开提供给本项目使用。该等权重数据的权利
+本评分包在运行时所使用的角色词条权重数据来自「异环工坊」（小程序），由其公开提供给本项目使用。该等权重数据的权利
 归异环工坊所有，不在上述 MIT License 的授权范围内。
 
 使用、再分发或展示基于该权重数据计算的结果时，请按异环工坊的要求标注
@@ -34,6 +33,6 @@ https://REDACTED-WEIGHT-API），由其公开提供给本项目使用。该等�
     角色权重数据来源小程序：异环工坊
 
 The character weight data used by this package at runtime is provided by
-异环工坊 (REDACTED-WEIGHT-API) and remains its property; it is NOT licensed under
+异环工坊 and remains its property; it is NOT licensed under
 the MIT License above. When using or redistributing results derived from it,
 please credit the source as required by 异环工坊.
