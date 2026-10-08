@@ -11,8 +11,6 @@
 - 每次评分优先实时请求接口，失败则降级用缓存文件计算；两者都不可用则报「评分数据缺失」。
 
 高亮规则：副词条只亮权重最高的 4 个，主词条只亮权重最高的（并列都亮）。
-核心件（卡带）与盘件（驱动块）主词条数据可能缺失（服务端只回 id 缺 name/value），
-此时按「魂属性异能伤害增强」判定高亮与主词条权重。
 核心件与盘件均不挂评级徽章。
 
 总评分评级（350 满分固定分档）：ACE≥280 / SSS≥260 / SS≥240 / S≥220 /
@@ -99,13 +97,6 @@ PIECE_GRADES = (
 # 两者是同一属性「魂属性异能伤害增强」，按游戏侧拼写统一。
 _PROP_ID_ALIASES = {"damageupsychebase": "damageuppsychebase"}
 
-# 盘件（驱动块）与核心件（卡带）主词条服务端可能只回 `{id}` 缺 `name`/`value`
-# （见 tajiduo_model.CharacterProperty docstring），无法从 name 反查词条 id，
-# 默认按「魂属性异能伤害增强」判定高亮与主词条权重。
-# 塔吉多侧拼写为 damageuppsychebase（双 p），与工坊单 p 别名见 _PROP_ID_ALIASES。
-_DEFAULT_MAIN_PROP_ID = "damageuppsychebase"
-
-
 def _canon_prop_id(prop_id: str) -> str:
     pid = (prop_id or "").lower()
     return _PROP_ID_ALIASES.get(pid, pid)
@@ -135,8 +126,6 @@ class _Result:
         # 属性 id 在角色面板可能与工坊权重 key 不同名（同一属性多种写法），
         # 故先按 id 精确命中；不命中再经 attributes.json 的 name -> ids 反查（同 yuye 做法）。
         pid = _canon_prop_id(prop.id)
-        if not prop.name.strip() and not prop.value.strip():
-            return pid == _DEFAULT_MAIN_PROP_ID
         if pid in self.top_main_ids or pid in self.top_sub_ids:
             return True
         return any(
@@ -146,10 +135,7 @@ class _Result:
 
     def is_main_prop_counted(self, prop: CharacterProperty) -> bool:
         # 装备主词条：只有「权重最高」的主词条高亮（核心件、盘件同一口径）。
-        # 主词条若缺 name/value（数据缺失），默认按「魂属性异能伤害增强」判定。
         pid = _canon_prop_id(prop.id)
-        if not prop.name.strip() and not prop.value.strip():
-            return pid == _DEFAULT_MAIN_PROP_ID
         return pid in self.top_main_ids
 
     def is_sub_prop_recommended(self, prop: CharacterProperty) -> bool:
@@ -181,15 +167,6 @@ def _cached_weights() -> dict[str, dict[str, dict[str, float] | frozenset[str]]]
         raise ValueError(f"评分数据缺失: {_CACHE_PATH}（接口暂不可用，等待首次接口成功后缓存）")
     raw = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
     return _normalize_weights(raw)
-
-
-def _resolve_main_prop_id(prop: CharacterProperty) -> str:
-    """主词条 id：数据缺失（缺 name/value）时默认按「魂属性异能伤害增强」。
-    仅用于评分时取主词条权重；高亮判定仍以实际词条 id 为准。"""
-    pid = _canon_prop_id(prop.id)
-    if not prop.name.strip() and not prop.value.strip():
-        return _DEFAULT_MAIN_PROP_ID
-    return pid
 
 
 def _weights() -> dict[str, dict[str, dict[str, float] | frozenset[str]]]:
@@ -489,9 +466,8 @@ class JiabailiScorer(BaseScorer):
             q = _quality_factor(item.id)
             if area is None:
                 # 核心件（卡带）：(主词条权重 × 50 + 副词条权重 / 理论满权重 × 100) × 品质
-                # 主词条数据缺失时按默认「魂属性异能伤害增强」取权重
                 main_w = max(
-                    (_weight_for(_resolve_main_prop_id(prop), main_weights) for prop in item.main_properties),
+                    (_weight_for(prop.id, main_weights) for prop in item.main_properties),
                     default=0.0,
                 )
                 sub_w = sum(
