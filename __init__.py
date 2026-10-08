@@ -11,7 +11,8 @@
 - 每次评分优先实时请求接口，失败则降级用缓存文件计算；两者都不可用则报「评分数据缺失」。
 
 高亮规则：副词条只亮权重最高的 4 个，主词条只亮权重最高的（并列都亮）。
-核心件与盘件均不挂评级徽章。
+核心件与盘件均按各自单件满分比例挂评级徽章（核心件满分 150，盘件满分 = 面积 × 10）：
+≥0.9→ACE / ≥0.8→SSS / ≥0.7→SS / ≥0.6→S / ≥0.5→A+ / ≥0.4→A / ≥0.3→B / ≥0.2→C / <0.2→D。
 
 总评分评级（350 满分固定分档）：ACE≥280 / SSS≥260 / SS≥240 / S≥220 /
 A+≥200 / A≥180 / B≥160 / C≥140 / D<140。
@@ -81,15 +82,16 @@ FULL_GRADES = (
 )
 
 # 单件评级阈值：按得分 / 该件理论满分的比例划分
+# 核心件满分 = CORE_MAX_SCORE（150），盘件满分 = 面积 × PIE_SCORE_PER_AREA（每格 10）
 PIECE_GRADES = (
-    (0.95, "ACE"),
-    (0.85, "SSS"),
-    (0.75, "SS"),
-    (0.65, "S"),
-    (0.55, "A+"),
-    (0.45, "A"),
-    (0.30, "B"),
-    (0.15, "C"),
+    (0.9, "ACE"),
+    (0.8, "SSS"),
+    (0.7, "SS"),
+    (0.6, "S"),
+    (0.5, "A+"),
+    (0.4, "A"),
+    (0.3, "B"),
+    (0.2, "C"),
     (0.0, "D"),
 )
 
@@ -489,8 +491,8 @@ class JiabailiScorer(BaseScorer):
 
             piece_score = min(piece_score, piece_max)
             total += piece_score
-            # 核心件与盘件均不挂评级徽章：grade 置 None，渲染端 grade_badge 对 None 不画
-            piece_grade = None
+            # 核心件与盘件均按各自单件满分比例挂评级徽章（核心件满分 150，盘件满分 = 面积 × 10）
+            piece_grade = _piece_grade(piece_score, piece_max)
             equipment.append(
                 _EquipmentView(
                     item_id=item.id,
